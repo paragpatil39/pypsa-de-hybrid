@@ -30,6 +30,8 @@ rule solve_network:
         runtime=config_provider("solving", "runtime", default="6h"),
     shadow:
         shadow_config
+    conda:
+        "../envs/environment.yaml"
     script:
         "../scripts/solve_network.py"
 
@@ -62,5 +64,7 @@ rule solve_operations_network:
         runtime=config_provider("solving", "runtime", default="6h"),
     shadow:
         shadow_config
+    conda:
+        "../envs/environment.yaml"
     script:
         "../scripts/solve_operations_network.py"

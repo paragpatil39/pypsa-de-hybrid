@@ -26,8 +26,13 @@ rule add_existing_baseyear:
             )
         ),
         powerplants=resources("powerplants_s_{clusters}.csv"),
+        busmap_s=resources("busmap_base_s.csv"),
+        busmap=resources("busmap_base_s_{clusters}.csv"),
+        clustered_pop_layout=resources("pop_layout_base_s_{clusters}.csv"),
         costs=lambda w: resources(
-            f"costs_{config_provider("scenario", "planning_horizons",0)(w)}_processed.csv"
+            "costs_{}.csv".format(
+                config_provider("scenario", "planning_horizons", 0)(w)
+            )
         ),
         cop_profiles=resources("cop_profiles_base_s_{clusters}_{planning_horizons}.nc"),
         existing_heating_distribution=lambda w: (
@@ -61,6 +66,8 @@ rule add_existing_baseyear:
         benchmarks(
             "add_existing_baseyear/base_s_{clusters}_{opts}_{sector_opts}_{planning_horizons}"
         )
+    conda:
+        "../envs/environment.yaml"
     script:
         "../scripts/add_existing_baseyear.py"
 
@@ -102,6 +109,8 @@ rule add_brownfield:
             )
         ),
         network_p=solved_previous_horizon,  #solved network at previous time step
+        costs=resources("costs_{planning_horizons}.csv"),
+        cop_profiles=resources("cop_profiles_base_s_{clusters}_{planning_horizons}.nc"),
     output:
         resources(
             "networks/base_s_{clusters}_{opts}_{sector_opts}_{planning_horizons}_brownfield.nc"
@@ -117,6 +126,8 @@ rule add_brownfield:
         benchmarks(
             "add_brownfield/base_s_{clusters}_{opts}_{sector_opts}_{planning_horizons}"
         )
+    conda:
+        "../envs/environment.yaml"
     script:
         "../scripts/add_brownfield.py"
 
@@ -162,5 +173,7 @@ rule solve_sector_network_myopic:
             RESULTS
             + "benchmarks/solve_sector_network/base_s_{clusters}_{opts}_{sector_opts}_{planning_horizons}"
         )
+    conda:
+        "../envs/environment.yaml"
     script:
         "../scripts/solve_network.py"
