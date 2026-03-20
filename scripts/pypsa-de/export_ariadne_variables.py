@@ -4,6 +4,9 @@ import math
 import os
 import re
 import sys
+
+sys.path.insert(0, os.path.abspath(os.path.dirname(__file__) + "/../.."))
+
 from functools import reduce
 
 import numpy as np
@@ -11,8 +14,6 @@ import pandas as pd
 import pypsa
 from numpy import isclose
 from pypsa.statistics import get_transmission_carriers
-
-sys.path.insert(0, os.path.abspath(os.path.dirname(__file__) + "/../.."))
 
 from scripts._helpers import (
     configure_logging,
@@ -22,7 +23,6 @@ from scripts._helpers import (
 )
 from scripts.add_electricity import calculate_annuity, load_costs
 
-pypsa.options.params.statistics.round = 10
 logger = logging.getLogger(__name__)
 
 # Defining global variables
@@ -68,19 +68,19 @@ def domestic_length_factor(n, carriers, region="DE"):
             continue  # Skip this carrier if not found in both links and lines
 
         # Loop through relevant components
-        for c in n.components:
-            if c.name in ["Link", "Line"] and carrier in c.static["carrier"].unique():
+        for c in n.iterate_components():
+            if c.name in ["Link", "Line"] and carrier in c.df["carrier"].unique():
                 # Filter based on carrier and region, excluding reversed links
-                all_i = c.static[
-                    (c.static["carrier"] == carrier)
-                    & (c.static.bus0 + c.static.bus1).str.contains(region)
-                    & ~c.static.index.str.contains("reversed")
+                all_i = c.df[
+                    (c.df["carrier"] == carrier)
+                    & (c.df.bus0 + c.df.bus1).str.contains(region)
+                    & ~c.df.index.str.contains("reversed")
                 ].index
 
                 # Separate domestic and cross-border links
                 domestic_i = all_i[
-                    c.static.loc[all_i, "bus0"].str.contains(region)
-                    & c.static.loc[all_i, "bus1"].str.contains(region)
+                    c.df.loc[all_i, "bus0"].str.contains(region)
+                    & c.df.loc[all_i, "bus1"].str.contains(region)
                 ]
                 cross_border_i = all_i.difference(domestic_i)
 
@@ -90,8 +90,8 @@ def domestic_length_factor(n, carriers, region="DE"):
                 # Calculate length factor if both sets are non-empty
                 if len(domestic_i) > 0 and len(cross_border_i) > 0:
                     length_factor = (
-                        c.static.loc[domestic_i, "length"].mean()
-                        / c.static.loc[cross_border_i, "length"].mean()
+                        c.df.loc[domestic_i, "length"].mean()
+                        / c.df.loc[cross_border_i, "length"].mean()
                     )
                     length_factors[(carrier, c.name)] = length_factor
                 else:
@@ -236,8 +236,6 @@ def _get_fuel_fractions(n, region, fuel):
     fuel_fractions = fuel_fractions.divide(domestic_fuel_supply.sum()).round(9)
 
     assert isclose(fuel_fractions.sum(), 1)
-
-    fuel_fractions /= fuel_fractions.sum()
 
     return fuel_fractions
 
@@ -868,11 +866,6 @@ def _get_capacities(n, region, cap_func, cap_string="Capacity|"):
         )
         .multiply(MW2GW)
     )
-    heat_pump_idxs = capacities_central_heat.filter(like="heat pump").index
-    capacities_central_heat[heat_pump_idxs] = abs(
-        capacities_central_heat[heat_pump_idxs]
-    )
-
     if cap_string.startswith("Investment") or cap_string.startswith("System Cost"):
         secondary_heat_techs = [
             "DAC",
@@ -1003,10 +996,6 @@ def _get_capacities(n, region, cap_func, cap_string="Capacity|"):
             errors="ignore",  # drop existing labels or do nothing
         )
         .multiply(MW2GW)
-    )
-    heat_pump_idxs = capacities_decentral_heat.filter(like="heat pump").index
-    capacities_decentral_heat[heat_pump_idxs] = abs(
-        capacities_decentral_heat[heat_pump_idxs]
     )
 
     var[cap_string + "Decentral Heat|Solar thermal"] = capacities_decentral_heat.filter(
@@ -1205,7 +1194,6 @@ def get_primary_energy(n, region):
         n.statistics.withdrawal(bus_carrier="oil primary", **kwargs)
         .get(("Link", "DE oil refining"), pd.Series(0))
         .item(),
-        atol=1,  # MW
     )
 
     gas_fractions = _get_fuel_fractions(n, region, "gas")
@@ -1769,7 +1757,7 @@ def get_secondary_energy(n, region, _industry_demand):
             ~hydrogen_production.index.str.startswith("H2 pipeline")
         ].sum(),
         rtol=0.01,
-        atol=1e-3,
+        atol=1e-5,
     )
 
     # Liquids
@@ -1804,7 +1792,7 @@ def get_secondary_energy(n, region, _industry_demand):
         var["Secondary Energy|Liquids"],
         liquids_production.sum(),
         rtol=0.01,
-        atol=1e-3,
+        atol=1e-5,
     )
 
     gas_supply = (
@@ -3128,7 +3116,7 @@ def get_nodal_flows(n, bus_carrier, region, query="index == index or index != in
         n.statistics.withdrawal(
             bus_carrier=bus_carrier,
             groupby=groupby,
-            groupby_time=False,
+            aggregate_time=False,
         )
         .query(query)
         .groupby("bus")
@@ -3164,7 +3152,7 @@ def get_nodal_supply(n, bus_carrier, query="index == index or index != index"):
         n.statistics.supply(
             bus_carrier=bus_carrier,
             groupby=groupby,
-            groupby_time=False,
+            aggregate_time=False,
         )
         .query(query)
         .groupby("bus")
@@ -4288,15 +4276,25 @@ def get_grid_investments(
 
 def get_policy(n, investment_year):
     var = pd.Series()
+
+    # add carbon component to fossil fuels if specified
+    if (snakemake.params.co2_price_add_on_fossils is not None) and (
+        investment_year in snakemake.params.co2_price_add_on_fossils.keys()
+    ):
+        co2_price_add_on = snakemake.params.co2_price_add_on_fossils[investment_year]
+    else:
+        co2_price_add_on = 0.0
     try:
         co2_limit_de = n.global_constraints.loc["co2_limit-DE", "mu"]
     except KeyError:
         co2_limit_de = 0
-    var["Price|Carbon"] = -n.global_constraints.loc["CO2Limit", "mu"] - co2_limit_de
+    var["Price|Carbon"] = (
+        -n.global_constraints.loc["CO2Limit", "mu"] - co2_limit_de + co2_price_add_on
+    )
 
-    var["Price|Carbon|EU-wide Regulation All Sectors"] = -n.global_constraints.loc[
-        "CO2Limit", "mu"
-    ]
+    var["Price|Carbon|EU-wide Regulation All Sectors"] = (
+        -n.global_constraints.loc["CO2Limit", "mu"] + co2_price_add_on
+    )
 
     # Price|Carbon|EU-wide Regulation Non-ETS
 
@@ -5407,9 +5405,17 @@ if __name__ == "__main__":
     # Load data
     _networks = [pypsa.Network(fn) for fn in snakemake.input.networks]
 
+    nhours = _networks[0].snapshot_weightings.generators.sum()
+    nyears = nhours / 8760
+
     costs = list(
         map(
-            lambda _costs: load_costs(_costs).multiply(1e-9),  # in bn €
+            lambda _costs: load_costs(
+                _costs,
+                snakemake.params.costs,
+                snakemake.params.max_hours,
+                nyears,
+            ).multiply(1e-9),  # in bn €
             snakemake.input.costs,
         )
     )

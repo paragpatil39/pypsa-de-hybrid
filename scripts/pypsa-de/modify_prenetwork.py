@@ -21,16 +21,15 @@ logger = logging.getLogger(__name__)
 
 def first_technology_occurrence(n):
     """
-    Drop configured technologies before configured year.
+    Sets p_nom_extendable to false for carriers with configured first
+    occurrence if investment year is before configured year.
     """
 
     for c, carriers in snakemake.params.technology_occurrence.items():
         for carrier, first_year in carriers.items():
             if int(snakemake.wildcards.planning_horizons) < first_year:
-                to_drop = n.df(c).query(f"carrier == '{carrier}'").index
-                if to_drop.empty:
-                    continue
-                n.remove(c, to_drop)
+                logger.info(f"{carrier} not extendable before {first_year}.")
+                n.df(c).loc[n.df(c).carrier == carrier, "p_nom_extendable"] = False
 
 
 def fix_new_boiler_profiles(n):
@@ -322,21 +321,19 @@ def unravel_carbonaceous_fuels(n):
     n.add("Carrier", "renewable oil")
 
     n.add("Bus", "DE", x=10.5, y=51.2, carrier="none")
-    n.add("Bus", "DE oil", location="DE", carrier="oil", unit="MWh_th")
-    n.add("Bus", "DE oil primary", location="DE", carrier="oil primary", unit="MWh_th")
+    n.add("Bus", "DE oil", location="DE", carrier="oil")
+    n.add("Bus", "DE oil primary", location="DE", carrier="oil primary")
     n.add(
         "Bus",
         "DE renewable oil",
         location="DE",
         carrier="renewable oil",
-        unit="MWh_th",
     )
     n.add(
         "Bus",
         "EU renewable oil",
         location="EU",
         carrier="renewable oil",
-        unit="MWh_th",
     )
 
     # add one generator for DE oil primary
@@ -470,7 +467,6 @@ def unravel_carbonaceous_fuels(n):
         "DE methanol",
         location="DE",
         carrier="methanol",
-        unit="MWh_th",
     )
 
     # change links from EU meoh to DE meoh
@@ -630,7 +626,6 @@ def unravel_gasbus(n, costs):
         "DE gas",
         location="DE",
         carrier="gas",
-        unit="MWh_LHV",
     )
 
     n.add(
@@ -638,7 +633,6 @@ def unravel_gasbus(n, costs):
         "DE gas primary",
         location="DE",
         carrier="gas primary",
-        unit="MWh_LHV",
     )
 
     n.add(
@@ -684,14 +678,12 @@ def unravel_gasbus(n, costs):
         "DE renewable gas",
         carrier="renewable gas",
         location="DE",
-        unit="MWh_LHV",
     )
     n.add(
         "Bus",
         "EU renewable gas",
         location="EU",
         carrier="renewable gas",
-        unit="MWh_LHV",
     )
 
     ### renewable gas
@@ -916,120 +908,6 @@ def modify_mobility_demand(n, mobility_data_file):
             * snakemake.params.bev_dsm_availability
         ) / dsm.e_nom.sum()
         n.stores.loc[dsm.index, "e_nom"] *= scale_factor
-
-
-def modify_industry_demand(
-    n,
-    year,
-    industry_energy_demand_file,
-    industry_production_file,
-    sector_ratios_file,
-    scale_non_energy=False,
-):
-    logger.info("Modifying industry demand in Germany.")
-
-    industry_production = pd.read_csv(
-        industry_production_file,
-        index_col="kton/a",
-    ).rename_axis("country")
-
-    sector_ratios = pd.read_csv(
-        sector_ratios_file,
-        header=[0, 1],
-        index_col=0,
-    ).rename_axis("carrier")
-
-    new_demand = pd.read_csv(
-        industry_energy_demand_file,
-        index_col=0,
-    )[str(year)].mul(1e6)
-
-    subcategories = ["HVC", "Methanol", "Chlorine", "Ammonia"]
-    carrier = ["hydrogen", "methane", "naphtha"]
-
-    ip = industry_production.loc["DE", subcategories]  # kt/a
-    sr = sector_ratios["DE"].loc[carrier, subcategories]  # MWh/tMaterial
-    _non_energy = sr.multiply(ip).sum(axis=1) * 1e3
-
-    non_energy = pd.Series(
-        {
-            "industry electricity": 0.0,
-            "low-temperature heat for industry": 0.0,
-            "solid biomass for industry": 0.0,
-            "H2 for industry": _non_energy["hydrogen"],
-            "coal for industry": 0.0,
-            "gas for industry": _non_energy["methane"],
-            "naphtha for industry": _non_energy["naphtha"],
-        }
-    )
-
-    _industry_loads = [
-        "solid biomass for industry",
-        "gas for industry",
-        "H2 for industry",
-        "industry methanol",
-        "naphtha for industry",
-        "low-temperature heat for industry",
-        "industry electricity",
-        "coal for industry",
-    ]
-    industry_loads = n.loads.query(
-        f"carrier in {_industry_loads} and bus.str.startswith('DE')"
-    )
-
-    if scale_non_energy:
-        new_demand_without_non_energy = new_demand.sum()
-        pypsa_industry_without_non_energy = (
-            industry_loads.p_set.sum() * 8760 - non_energy.sum()
-        )
-        non_energy_scaling_factor = (
-            new_demand_without_non_energy / pypsa_industry_without_non_energy
-        )
-        logger.info(
-            f"Scaling non-energy use by {non_energy_scaling_factor:.2f} to match UBA data."
-        )
-        non_energy_corrected = non_energy * non_energy_scaling_factor
-    else:
-        non_energy_corrected = non_energy
-
-    for carrier in [
-        "industry electricity",
-        # "H2 for industry", # skip because UBA is too optimistic on H2
-        "solid biomass for industry",
-        "low-temperature heat for industry",
-    ]:
-        loads_i = n.loads.query(
-            f"carrier == '{carrier}' and bus.str.startswith('DE')"
-        ).index
-        logger.info(
-            f"Total load of {carrier} in DE before scaling: {n.loads.loc[loads_i, 'p_set'].sum() * 8760:.2f} MWh/a"
-        )
-        total_load = industry_loads.p_set.loc[loads_i].sum() * 8760
-        scaling_factor = (
-            new_demand[carrier] + non_energy_corrected[carrier]
-        ) / total_load
-        n.loads.loc[loads_i, "p_set"] *= scaling_factor
-        logger.info(
-            f"Total load of {carrier} in DE after scaling: {n.loads.loc[loads_i, 'p_set'].sum() * 8760:.2f} MWh/a"
-        )
-
-    # Fossil fuels are aggregated in UBA MWMS but have to be scaled separately
-    fossil_loads = industry_loads.query("carrier.str.contains('gas|coal|naphtha')")
-    fossil_totals = (
-        fossil_loads[["p_set", "carrier"]].groupby("carrier").p_set.sum() * 8760
-    )
-    fossil_energy = fossil_totals - non_energy[fossil_totals.index]
-    fossil_energy_corrected = fossil_energy * new_demand["fossil"] / fossil_energy.sum()
-    fossil_totals_corrected = (
-        fossil_energy_corrected + non_energy_corrected[fossil_totals.index]
-    )
-    for carrier in fossil_totals.index:
-        loads_i = fossil_loads.query(
-            f"carrier == '{carrier}' and bus.str.startswith('DE')"
-        ).index
-        n.loads.loc[loads_i, "p_set"] *= (
-            fossil_totals_corrected[carrier] / fossil_totals[carrier]
-        )
 
 
 def add_hydrogen_turbines(n):
@@ -1392,14 +1270,6 @@ def scale_capacity(n, scaling):
                 ]
 
 
-def limit_cross_border_flows_ac(n, s_max_pu):
-    logger.info(
-        f"Limiting AC cross-border flows between all countries to {s_max_pu} of maximum capacity."
-    )
-    cross_border_lines = n.lines.index[n.lines.bus0.str[:2] != n.lines.bus1.str[:2]]
-    n.lines.loc[cross_border_lines, "s_max_pu"] = s_max_pu
-
-
 if __name__ == "__main__":
     if "snakemake" not in globals():
         snakemake = mock_snakemake(
@@ -1419,8 +1289,15 @@ if __name__ == "__main__":
     logger.info("Adding PyPSA-DE specific functionality")
 
     n = pypsa.Network(snakemake.input.network)
+    nhours = n.snapshot_weightings.generators.sum()
+    nyears = nhours / 8760
 
-    costs = load_costs(snakemake.input.costs)
+    costs = load_costs(
+        snakemake.input.costs,
+        snakemake.params.costs,
+        snakemake.params.max_hours,
+        nyears,
+    )
 
     modify_mobility_demand(n, snakemake.input.modified_mobility_data)
 
@@ -1476,24 +1353,5 @@ if __name__ == "__main__":
     scale_capacity(n, snakemake.params.scale_capacity)
 
     sanitize_custom_columns(n)
-
-    if current_year in snakemake.params.uba_for_industry:
-        if current_year not in [2025, 2030, 2035]:
-            logger.error(
-                "The UBA for industry data is only available for 2025, 2030 and 2035. Please check your config."
-            )
-        modify_industry_demand(
-            n,
-            current_year,
-            snakemake.input.new_industrial_energy_demand,
-            snakemake.input.industrial_production_per_country_tomorrow,
-            snakemake.input.industry_sector_ratios,
-            scale_non_energy=snakemake.params.scale_industry_non_energy,
-        )
-
-    if current_year in snakemake.params.limit_cross_border_flows_ac:
-        limit_cross_border_flows_ac(
-            n, snakemake.params.limit_cross_border_flows_ac[current_year]
-        )
 
     n.export_to_netcdf(snakemake.output.network)

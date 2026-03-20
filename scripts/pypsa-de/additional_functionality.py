@@ -412,11 +412,29 @@ def add_national_co2_budgets(n, snakemake, national_co2_budgets, investment_year
 
     """
     logger.info("Adding national CO2 budgets")
+
+    # --- Guard for electricity-only workflows / minimal solves ---
+    required_inputs = ["co2_totals_name", "energy_totals"]
+    missing = [k for k in required_inputs if not hasattr(snakemake.input, k)]
+    if missing:
+        logger.warning(
+            "Skipping national CO2 budgets because required inputs are missing in this rule: %s. "
+            "This is expected for electricity-only runs.",
+            missing,
+        )
+        return
+
+    if not hasattr(snakemake, "params") or not hasattr(snakemake.params, "energy_year"):
+        logger.warning(
+            "Skipping national CO2 budgets because snakemake.params.energy_year is missing. "
+            "This is expected for electricity-only runs."
+        )
+        return
+    
     nhours = n.snapshot_weightings.generators.sum()
     nyears = nhours / 8760
 
     sectors = determine_emission_sectors(n.config["sector"])
-    energy_totals = pd.read_csv(snakemake.input.energy_totals, index_col=[0, 1])
 
     # convert MtCO2 to tCO2
     co2_totals = 1e6 * pd.read_csv(snakemake.input.co2_totals_name, index_col=0)
@@ -426,6 +444,9 @@ def add_national_co2_budgets(n, snakemake, national_co2_budgets, investment_year
     for ct in national_co2_budgets:
         if ct != "DE":
             logger.error(
+                f"CO2 budget for countries other than `DE` is not yet supported. Found country {ct}. Please check the config file."
+            )
+            raise NotImplementedError(
                 f"CO2 budget for countries other than `DE` is not yet supported. Found country {ct}. Please check the config file."
             )
 
@@ -441,8 +462,8 @@ def add_national_co2_budgets(n, snakemake, national_co2_budgets, investment_year
             links = n.links.index[
                 (n.links.index.str[:2] == ct)
                 & (n.links[f"bus{port}"] == "co2 atmosphere")
-                & ~n.links.carrier.str.contains(
-                    "shipping|aviation"
+                & (
+                    n.links.carrier != "kerosene for aviation"
                 )  # first exclude aviation to multiply it with a domestic factor later
             ]
 
@@ -466,68 +487,27 @@ def add_national_co2_budgets(n, snakemake, national_co2_budgets, investment_year
             )
 
         # Aviation demand
+        energy_totals = pd.read_csv(snakemake.input.energy_totals, index_col=[0, 1])
         domestic_aviation = energy_totals.loc[
             (ct, snakemake.params.energy_year), "total domestic aviation"
         ]
         international_aviation = energy_totals.loc[
             (ct, snakemake.params.energy_year), "total international aviation"
         ]
-        domestic_aviation_factor = domestic_aviation / (
+        domestic_factor = domestic_aviation / (
             domestic_aviation + international_aviation
         )
         aviation_links = n.links[
             (n.links.index.str[:2] == ct) & (n.links.carrier == "kerosene for aviation")
         ]
-        lhs.append(
-            (
-                n.model["Link-p"].loc[:, aviation_links.index]
-                * aviation_links.efficiency2
-                * n.snapshot_weightings.generators
-            ).sum()
-            * domestic_aviation_factor
-        )
+        lhs.append
+        (
+            n.model["Link-p"].loc[:, aviation_links.index]
+            * aviation_links.efficiency2
+            * n.snapshot_weightings.generators
+        ).sum() * domestic_factor
         logger.info(
-            f"Adding domestic aviation emissions for {ct} with a factor of {domestic_aviation_factor}"
-        )
-
-        # Shipping oil
-        domestic_navigation = energy_totals.loc[
-            (ct, snakemake.params.energy_year), "total domestic navigation"
-        ]
-        international_navigation = energy_totals.loc[
-            (ct, snakemake.params.energy_year), "total international navigation"
-        ]
-        domestic_navigation_factor = domestic_navigation / (
-            domestic_navigation + international_navigation
-        )
-        shipping_links = n.links[
-            (n.links.index.str[:2] == ct) & (n.links.carrier == "shipping oil")
-        ]
-        lhs.append(
-            (
-                n.model["Link-p"].loc[:, shipping_links.index]
-                * shipping_links.efficiency2
-                * n.snapshot_weightings.generators
-            ).sum()
-            * domestic_navigation_factor
-        )
-
-        # Shipping methanol
-        shipping_meoh_links = n.links[
-            (n.links.index.str[:2] == ct) & (n.links.carrier == "shipping methanol")
-        ]
-        if not shipping_meoh_links.empty:  # no shipping methanol in 2025
-            lhs.append(
-                (
-                    n.model["Link-p"].loc[:, shipping_meoh_links.index]
-                    * shipping_meoh_links.efficiency2
-                    * n.snapshot_weightings.generators
-                ).sum()
-                * domestic_navigation_factor
-            )
-
-        logger.info(
-            f"Adding domestic shipping emissions for {ct} with a factor of {domestic_navigation_factor}"
+            f"Adding domestic aviation emissions for {ct} with a factor of {domestic_factor}"
         )
 
         # Adding Efuel imports and exports to constraint
@@ -717,51 +697,94 @@ def force_boiler_profiles_existing_per_boiler(n):
 
 def add_h2_derivate_limit(n, investment_year, limits_volume_max):
     for ct in limits_volume_max["h2_derivate_import"]:
-        limit = limits_volume_max["h2_derivate_import"][ct][investment_year] * 1e6
+        # If investment_year not present, skip gracefully
+        if investment_year not in limits_volume_max["h2_derivate_import"][ct]:
+            logger.warning(
+                f"No h2_derivate_import limit for {ct} in year {investment_year}; skipping."
+            )
+            continue
 
+        limit = limits_volume_max["h2_derivate_import"][ct][investment_year] * 1e6
         logger.info(f"limiting H2 derivate imports in {ct} to {limit / 1e6} TWh/a")
 
-        incoming = n.links.loc[
-            [
-                "EU renewable oil -> DE oil",
-                "EU methanol -> DE methanol",
-                "EU renewable gas -> DE gas",
-            ]
-        ].index
-        outgoing = n.links.loc[
-            [
-                "DE renewable oil -> EU oil",
-                "DE methanol -> EU methanol",
-                "DE renewable gas -> EU gas",
-            ]
-        ].index
+        # Build expected link names for this country (ct)
+        incoming_all = [
+            f"EU renewable oil -> {ct} oil",
+            f"EU methanol -> {ct} methanol",
+            f"EU renewable gas -> {ct} gas",
+        ]
+        outgoing_all = [
+            f"{ct} renewable oil -> EU oil",
+            f"{ct} methanol -> EU methanol",
+            f"{ct} renewable gas -> EU gas",
+        ]
+
+        # Filter to links that actually exist in this network
+        incoming_exist = [x for x in incoming_all if x in n.links.index]
+        outgoing_exist = [x for x in outgoing_all if x in n.links.index]
+
+        missing_in = [x for x in incoming_all if x not in n.links.index]
+        missing_out = [x for x in outgoing_all if x not in n.links.index]
+
+        # If none exist, skip (this is your current situation)
+        if not incoming_exist and not outgoing_exist:
+            logger.warning(
+                f"Skipping H2 derivate import limits for {ct} ({investment_year}): "
+                f"no expected EU<->{ct} derivate links present in n.links."
+            )
+            logger.debug(f"Missing incoming links: {missing_in}")
+            logger.debug(f"Missing outgoing links: {missing_out}")
+            continue
+
+        # Helper: select subset by indices (0=oil,1=methanol,2=gas), but only if present
+        def _subset(names_all, names_exist, indices):
+            if isinstance(indices, int):
+                indices = [indices]
+            selected = []
+            for i in indices:
+                nm = names_all[i]
+                if nm in names_exist:
+                    selected.append(nm)
+            return selected
 
         carrier_idx_dict = {
-            # Every carrier should respect the limit individually
             "renewable_oil": 0,
             "methanol": 1,
             "renewable_gas": 2,
-            # Exports of one carrier should not compensate for imports of another carrier
             "H2_derivate_oil_meoh": [0, 1],
             "H2_derivate_oil_gas": [0, 2],
             "H2_derivate_meoh_gas": [1, 2],
-            # The sum of all carriers should respect the limit
             "H2_derivate_oil_meoh_gas": [0, 1, 2],
         }
+
         for carrier, idx in carrier_idx_dict.items():
             cname = f"{carrier}_import_limit-{ct}"
 
-            incoming_p = (
-                n.model["Link-p"].loc[:, incoming[idx]]
-                * n.snapshot_weightings.generators
-            ).sum()
-            outgoing_p = (
-                n.model["Link-p"].loc[:, outgoing[idx]]
-                * n.snapshot_weightings.generators
-            ).sum()
+            inc_links = _subset(incoming_all, incoming_exist, idx)
+            out_links = _subset(outgoing_all, outgoing_exist, idx)
+
+            # If some carriers are missing in this build, skip only that constraint
+            if not inc_links and not out_links:
+                logger.warning(
+                    f"Skipping constraint {cname}: required links not present for carrier subset {idx}."
+                )
+                continue
+
+            # Build LHS as (imports - exports) aggregated over the selected links
+            incoming_p = 0
+            outgoing_p = 0
+
+            if inc_links:
+                incoming_p = (
+                    n.model["Link-p"].loc[:, inc_links] * n.snapshot_weightings.generators
+                ).sum()
+
+            if out_links:
+                outgoing_p = (
+                    n.model["Link-p"].loc[:, out_links] * n.snapshot_weightings.generators
+                ).sum()
 
             lhs = incoming_p - outgoing_p
-
             n.model.add_constraints(lhs <= limit, name=f"GlobalConstraint-{cname}")
 
             if cname in n.global_constraints.index:
@@ -778,9 +801,6 @@ def add_h2_derivate_limit(n, investment_year, limits_volume_max):
                 type="",
                 carrier_attribute="",
             )
-
-    # Export bans on efuels are implemented in modify_prenetwork by restricting p_max_pu of the DE -> EU links
-
 
 def adapt_nuclear_output(n):
     logger.info(
@@ -819,11 +839,23 @@ def adapt_nuclear_output(n):
         carrier_attribute="",
     )
 
-
 def additional_functionality(n, snapshots, snakemake):
     logger.info("Adding Ariadne-specific functionality")
 
-    investment_year = int(snakemake.wildcards.planning_horizons[-4:])
+    #investment_year = int(snakemake.wildcards.planning_horizons[-4:])
+    if hasattr(snakemake.wildcards, "planning_horizons"):
+        investment_year = int(str(snakemake.wildcards.planning_horizons)[-4:])
+    else:
+        # use config (scenario/planning_horizons), pick the first if list
+        ph = snakemake.config.get("scenario", {}).get("planning_horizons", None)
+        if isinstance(ph, list) and len(ph) > 0:
+            investment_year = int(str(ph[0])[-4:])
+        elif ph is not None:
+            investment_year = int(str(ph)[-4:])
+        else:
+            # final fallback: infer from snapshots start year (least preferred)
+            investment_year = int(str(snakemake.config["snapshots"]["start"])[:4])
+
     constraints = snakemake.params.solving["constraints"]
 
     add_capacity_limits(

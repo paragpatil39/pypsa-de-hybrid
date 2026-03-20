@@ -52,7 +52,7 @@ def locate_missing_industrial_sites(df):
     except ImportError:
         raise ModuleNotFoundError(
             "Optional dependency 'geopy' not found."
-            "Install via 'pixi add geopy'"
+            "Install via 'conda install -c conda-forge geopy'"
             "or set 'industry: hotmaps_locate_missing: false'."
         )
 
