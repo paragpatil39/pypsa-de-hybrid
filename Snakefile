@@ -12,10 +12,10 @@ from snakemake.utils import min_version
 min_version("8.11")
 
 from scripts._helpers import (
-    get_rdir,
-    get_scenarios,
-    get_shadow,
     path_provider,
+    get_scenarios,
+    get_rdir,
+    get_shadow,
 )
 
 
@@ -38,6 +38,8 @@ logs = path_provider("logs/", RDIR, shared_resources, exclude_from_shared)
 benchmarks = path_provider("benchmarks/", RDIR, shared_resources, exclude_from_shared)
 resources = path_provider("resources/", RDIR, shared_resources, exclude_from_shared)
 
+cutout_dir = config["atlite"]["cutout_directory"]
+CDIR = Path(cutout_dir).joinpath("" if run["shared_cutouts"] else RDIR)
 RESULTS = "results/" + RDIR
 
 
@@ -53,12 +55,6 @@ wildcard_constraints:
 
 
 include: "rules/common.smk"
-
-
-# Data constants
-OSM_DATASET = dataset_version("osm")
-
-
 include: "rules/collect.smk"
 include: "rules/retrieve.smk"
 include: "rules/build_electricity.smk"
@@ -94,20 +90,14 @@ rule all:
         ),
         expand(
             RESULTS
-            + "maps/static/base_s_{clusters}_{opts}_{sector_opts}-costs-all_{planning_horizons}.pdf",
-            run=config["run"]["name"],
-            **config["scenario"],
-        ),
-        # COP profiles plots
-        expand(
-            RESULTS + "graphs/cop_profiles_s_{clusters}_{planning_horizons}.html",
+            + "maps/base_s_{clusters}_{opts}_{sector_opts}-costs-all_{planning_horizons}.pdf",
             run=config["run"]["name"],
             **config["scenario"],
         ),
         lambda w: expand(
             (
                 RESULTS
-                + "maps/static/base_s_{clusters}_{opts}_{sector_opts}-h2_network_{planning_horizons}.pdf"
+                + "maps/base_s_{clusters}_{opts}_{sector_opts}-h2_network_{planning_horizons}.pdf"
                 if config_provider("sector", "H2_network")(w)
                 else []
             ),
@@ -117,7 +107,7 @@ rule all:
         lambda w: expand(
             (
                 RESULTS
-                + "maps/static/base_s_{clusters}_{opts}_{sector_opts}-ch4_network_{planning_horizons}.pdf"
+                + "maps/base_s_{clusters}_{opts}_{sector_opts}-ch4_network_{planning_horizons}.pdf"
                 if config_provider("sector", "gas_network")(w)
                 else []
             ),
@@ -132,67 +122,14 @@ rule all:
             ),
             run=config["run"]["name"],
         ),
-        expand(
-            RESULTS
-            + "graphics/balance_timeseries/s_{clusters}_{opts}_{sector_opts}_{planning_horizons}",
-            run=config["run"]["name"],
-            **config["scenario"],
-        ),
-        expand(
-            RESULTS
-            + "graphics/heatmap_timeseries/s_{clusters}_{opts}_{sector_opts}_{planning_horizons}",
-            run=config["run"]["name"],
-            **config["scenario"],
-        ),
-        # Explicitly list heat source types for temperature maps
         lambda w: expand(
             (
                 RESULTS
-                + "maps/static/base_s_{clusters}_{opts}_{sector_opts}_{planning_horizons}-heat_source_temperature_map_river_water.html"
-                if config_provider("plotting", "enable_heat_source_maps")(w)
-                and "river_water"
-                in config_provider("sector", "heat_pump_sources", "urban central")(w)
-                else []
+                + "maps/base_s_{clusters}_{opts}_{sector_opts}_{planning_horizons}-balance_map_{carrier}.pdf"
             ),
             **config["scenario"],
             run=config["run"]["name"],
-        ),
-        lambda w: expand(
-            (
-                RESULTS
-                + "maps/static/base_s_{clusters}_{opts}_{sector_opts}_{planning_horizons}-heat_source_temperature_map_sea_water.html"
-                if config_provider("plotting", "enable_heat_source_maps")(w)
-                and "sea_water"
-                in config_provider("sector", "heat_pump_sources", "urban central")(w)
-                else []
-            ),
-            **config["scenario"],
-            run=config["run"]["name"],
-        ),
-        lambda w: expand(
-            (
-                RESULTS
-                + "maps/static/base_s_{clusters}_{opts}_{sector_opts}_{planning_horizons}-heat_source_temperature_map_ambient_air.html"
-                if config_provider("plotting", "enable_heat_source_maps")(w)
-                and "air"
-                in config_provider("sector", "heat_pump_sources", "urban central")(w)
-                else []
-            ),
-            **config["scenario"],
-            run=config["run"]["name"],
-        ),
-        # Only river_water has energy maps
-        lambda w: expand(
-            (
-                RESULTS
-                + "maps/static/base_s_{clusters}_{opts}_{sector_opts}_{planning_horizons}-heat_source_energy_map_river_water.html"
-                if config_provider("plotting", "enable_heat_source_maps")(w)
-                and "river_water"
-                in config_provider("sector", "heat_pump_sources", "urban central")(w)
-                else []
-            ),
-            **config["scenario"],
-            run=config["run"]["name"],
+            carrier=config_provider("plotting", "balance_map", "bus_carriers")(w),
         ),
         expand(
             RESULTS
@@ -206,20 +143,14 @@ rule all:
             run=config["run"]["name"],
             **config["scenario"],
         ),
-        expand(
-            RESULTS
-            + "graphics/interactive_bus_balance/s_{clusters}_{opts}_{sector_opts}_{planning_horizons}",
-            run=config["run"]["name"],
-            **config["scenario"],
-        ),
-        lambda w: balance_map_paths("static", w),
-        lambda w: balance_map_paths("interactive", w),
     default_target: True
 
 
 rule create_scenarios:
     output:
         config["run"]["scenarios"]["file"],
+    conda:
+        "envs/environment.yaml"
     script:
         "config/create_scenarios.py"
 
@@ -229,25 +160,13 @@ rule purge:
         import builtins
 
         do_purge = builtins.input(
-            "Do you really want to delete all generated files?\n"
-            "\t* resources\n"
-            "\t* results\n"
-            "\t* docs\n"
-            "Downloaded files are kept.\n"
-            "Delete all files in the folders above? [y/N] "
+            "Do you really want to delete all generated resources, \nresults and docs (downloads are kept)? [y/N] "
         )
         if do_purge == "y":
-
-            # Remove the directories and recreate them with .gitkeep
-            for dir_path in ["resources/", "results/"]:
-                rmtree(dir_path, ignore_errors=True)
-                Path(dir_path).mkdir(parents=True, exist_ok=True)
-                (Path(dir_path) / ".gitkeep").touch()
-
+            rmtree("resources/", ignore_errors=True)
+            rmtree("results/", ignore_errors=True)
             rmtree("doc/_build", ignore_errors=True)
-            print(
-                "Purging all generated resources, results and docs. Downloads are kept."
-            )
+            print("Purging generated resources, results and docs. Downloads are kept.")
         else:
             raise Exception(f"Input {do_purge}. Aborting purge.")
 
@@ -274,6 +193,8 @@ rule rulegraph:
         pdf=resources("dag_rulegraph.pdf"),
         png=resources("dag_rulegraph.png"),
         svg=resources("dag_rulegraph.svg"),
+    conda:
+        "envs/environment.yaml"
     shell:
         r"""
         # Generate DOT file using nested snakemake with the dumped final config
@@ -282,17 +203,15 @@ rule rulegraph:
 
         # Generate visualizations from the DOT file
         if [ -s {output.dot} ]; then
-            dot -c
-
             echo "[Rule rulegraph] Generating PDF from DOT"
             dot -Tpdf -o {output.pdf} {output.dot} || {{ echo "Error: Failed to generate PDF. Is graphviz installed?" >&2; exit 1; }}
-
+            
             echo "[Rule rulegraph] Generating PNG from DOT"
             dot -Tpng -o {output.png} {output.dot} || {{ echo "Error: Failed to generate PNG. Is graphviz installed?" >&2; exit 1; }}
-
+            
             echo "[Rule rulegraph] Generating SVG from DOT"
             dot -Tsvg -o {output.svg} {output.dot} || {{ echo "Error: Failed to generate SVG. Is graphviz installed?" >&2; exit 1; }}
-
+            
             echo "[Rule rulegraph] Successfully generated all formats."
         else
             echo "[Rule rulegraph] Error: Failed to generate valid DOT content." >&2
@@ -312,6 +231,8 @@ rule filegraph:
         pdf=resources("dag_filegraph.pdf"),
         png=resources("dag_filegraph.png"),
         svg=resources("dag_filegraph.svg"),
+    conda:
+        "envs/environment.yaml"
     shell:
         r"""
         # Generate DOT file using nested snakemake with the dumped final config
@@ -322,13 +243,13 @@ rule filegraph:
         if [ -s {output.dot} ]; then
             echo "[Rule filegraph] Generating PDF from DOT"
             dot -Tpdf -o {output.pdf} {output.dot} || {{ echo "Error: Failed to generate PDF. Is graphviz installed?" >&2; exit 1; }}
-
+            
             echo "[Rule filegraph] Generating PNG from DOT"
             dot -Tpng -o {output.png} {output.dot} || {{ echo "Error: Failed to generate PNG. Is graphviz installed?" >&2; exit 1; }}
-
+            
             echo "[Rule filegraph] Generating SVG from DOT"
             dot -Tsvg -o {output.svg} {output.dot} || {{ echo "Error: Failed to generate SVG. Is graphviz installed?" >&2; exit 1; }}
-
+            
             echo "[Rule filegraph] Successfully generated all formats."
         else
             echo "[Rule filegraph] Error: Failed to generate valid DOT content." >&2
@@ -343,7 +264,7 @@ rule doc:
     output:
         directory("doc/_build"),
     shell:
-        "pixi run build-docs {output} html"
+        "make -C doc html"
 
 
 rule sync:
@@ -381,46 +302,58 @@ rule clean:
         print("Data downloaded to data/ has not been cleaned.")
 
 
-if (ARIADNE_DATABASE := dataset_version("ariadne_database"))["source"] in ["primary"]:
+rule modify_cost_data:
+    params:
+        file_path="ariadne-data/costs/",
+        file_name="costs_{planning_horizons}.csv",
+        cost_horizon=config_provider("costs", "horizon"),
+        NEP=config_provider("costs", "NEP"),
+        planning_horizons=config_provider("scenario", "planning_horizons"),
+        co2_price_add_on_fossils=config_provider("co2_price_add_on_fossils"),
+    input:
+        modifications=lambda w: (
+            "ariadne-data/costs_2019-modifications.csv"
+            if w.planning_horizons == "2020"
+            and config_provider("energy", "energy_totals_year") == 2019
+            else "ariadne-data/costs_{planning_horizons}-modifications.csv"
+        ),
+    output:
+        resources("costs_{planning_horizons}.csv"),
+    resources:
+        mem_mb=1000,
+    log:
+        logs("modify_cost_data_{planning_horizons}.log"),
+    script:
+        "scripts/pypsa-de/modify_cost_data.py"
+
+
+if config["pypsa-de"]["retrieve_ariadne_database"]:
 
     rule retrieve_ariadne_database:
-        params:
-            source="primary",
         output:
             data="data/ariadne_database.csv",
         log:
-            "logs/retrieve_ariadne_database_primary.log",
+            "logs/retrieve_ariadne_database.log",
         resources:
             mem_mb=1000,
         script:
             "scripts/pypsa-de/retrieve_ariadne_database.py"
 
 
-if (ARIADNE_DATABASE := dataset_version("ariadne_database"))["source"] in ["archive"]:
-
-    rule retrieve_ariadne_database:
-        params:
-            source="archive",
-        input:
-            raw_xlsx=storage(ARIADNE_DATABASE["url"]),
-        output:
-            data="data/ariadne_database.csv",
-        log:
-            "logs/retrieve_ariadne_database_archive.log",
-        resources:
-            mem_mb=1000,
-        script:
-            "scripts/pypsa-de/retrieve_ariadne_database.py"
+def get_ariadne_database(w):
+    if config["pypsa-de"]["retrieve_ariadne_database"]:
+        return "data/ariadne_database.csv"
+    else:
+        return "ariadne-data/ariadne_database.csv"
 
 
-if (ARIADNE_TEMPLATE := dataset_version("ariadne_template"))["source"] in [
-    "primary",
-]:
+if config["enable"]["retrieve"]:
 
     rule retrieve_ariadne_template:
         input:
             storage(
                 "https://github.com/iiasa/ariadne-intern-workflow/raw/main/attachments/2025-01-27_template_Ariadne.xlsx",
+                keep_local=True,
             ),
         output:
             "data/template_ariadne_database.xlsx",
@@ -428,11 +361,14 @@ if (ARIADNE_TEMPLATE := dataset_version("ariadne_template"))["source"] in [
             move(input[0], output[0])
 
 
-if (OPEN_MASTR := dataset_version("open_mastr"))["source"] in ["primary"]:
+if config["enable"]["retrieve"]:
 
-    rule retrieve_open_mastr:
+    rule retrieve_mastr:
         input:
-            storage(OPEN_MASTR["url"]),
+            storage(
+                "https://zenodo.org/records/8225106/files/bnetza_open_mastr_2023-08-08_B.zip",
+                keep_local=True,
+            ),
         params:
             "data/mastr",
         output:
@@ -442,22 +378,23 @@ if (OPEN_MASTR := dataset_version("open_mastr"))["source"] in ["primary"]:
             unpack_archive(input[0], params[0])
 
 
-if (EGON := dataset_version("egon"))["source"] in ["primary"]:
+if config["enable"]["retrieve"]:
 
     rule retrieve_egon_data:
-        input:
-            spatial=storage(
-                f"{EGON['url']}?id_spatial=5&year=2018",
-            ),
-            mapping=storage(
-                f"{EGON['url']}_description?id_spatial=5",
-            ),
         output:
             spatial="data/egon/demandregio_spatial_2018.json",
             mapping="data/egon/mapping_technologies.json",
-        run:
-            move(input.spatial, output.spatial)
-            move(input.mapping, output.mapping)
+        shell:
+            """
+            mkdir -p data/egon
+            curl -o {output.spatial} "https://api.opendata.ffe.de/demandregio/demandregio_spatial?id_spatial=5&year=2018"
+            curl -o {output.mapping} "https://api.opendata.ffe.de/demandregio/demandregio_spatial_description?id_spatial=5"
+            """
+
+
+if config["enable"]["retrieve"] and config["enable"].get("retrieve_cost_data", True):
+
+    ruleorder: modify_cost_data > retrieve_cost_data
 
 
 rule build_exogenous_mobility_data:
@@ -471,7 +408,7 @@ rule build_exogenous_mobility_data:
         aviation_demand_factor=config_provider("sector", "aviation_demand_factor"),
         energy_totals_year=config_provider("energy", "energy_totals_year"),
     input:
-        ariadne="data/ariadne_database.csv",
+        ariadne=get_ariadne_database,
         energy_totals=resources("energy_totals.csv"),
     output:
         mobility_data=resources(
@@ -511,7 +448,7 @@ rule prepare_district_heating_subnodes:
         regions_onshore=resources("regions_onshore_base_s_{clusters}.geojson"),
         fernwaermeatlas="data/fernwaermeatlas/fernwaermeatlas.xlsx",
         cities="data/fernwaermeatlas/cities_geolocations.geojson",
-        lau_regions=rules.retrieve_lau_regions.output["zip"],
+        lau_regions="data/lau_regions.zip",
         census=storage(
             "https://www.destatis.de/static/DE/zensus/gitterdaten/Zensus2022_Heizungsart.zip",
             keep_local=True,
@@ -577,7 +514,7 @@ rule add_district_heating_subnodes:
         existing_heating_distribution=lambda w: resources(
             f"existing_heating_distribution_base_s_{{clusters}}_{baseyear_value(w)}.csv"
         ),
-        lau_regions=rules.retrieve_lau_regions.output["zip"],
+        lau_regions="data/lau_regions.zip",
     output:
         network=resources(
             "networks/base-extended_s_{clusters}_{opts}_{sector_opts}_{planning_horizons}.nc"
@@ -626,6 +563,8 @@ rule modify_prenetwork:
     params:
         efuel_export_ban=config_provider("solving", "constraints", "efuel_export_ban"),
         enable_kernnetz=config_provider("wasserstoff_kernnetz", "enable"),
+        costs=config_provider("costs"),
+        max_hours=config_provider("electricity", "max_hours"),
         technology_occurrence=config_provider("first_technology_occurrence"),
         fossil_boiler_ban=config_provider("new_decentral_fossil_boiler_ban"),
         coal_ban=config_provider("coal_generation_ban"),
@@ -654,14 +593,8 @@ rule modify_prenetwork:
         bev_charge_rate=config_provider("sector", "bev_charge_rate"),
         bev_energy=config_provider("sector", "bev_energy"),
         bev_dsm_availability=config_provider("sector", "bev_dsm_availability"),
-        uba_for_industry=config_provider("pypsa-de", "uba_for_industry", "enable"),
-        scale_industry_non_energy=config_provider(
-            "pypsa-de", "uba_for_industry", "scale_industry_non_energy"
-        ),
-        limit_cross_border_flows_ac=config_provider(
-            "pypsa-de", "limit_cross_border_flows_ac"
-        ),
     input:
+        costs_modifications="ariadne-data/costs_{planning_horizons}-modifications.csv",
         network=resources(
             "networks/base_s_{clusters}_{opts}_{sector_opts}_{planning_horizons}_brownfield.nc"
         ),
@@ -670,7 +603,7 @@ rule modify_prenetwork:
             if config_provider("wasserstoff_kernnetz", "enable")(w)
             else []
         ),
-        costs=resources("costs_{planning_horizons}_processed.csv"),
+        costs=resources("costs_{planning_horizons}.csv"),
         modified_mobility_data=resources(
             "modified_mobility_data_{clusters}_{planning_horizons}.csv"
         ),
@@ -680,20 +613,13 @@ rule modify_prenetwork:
         industrial_demand=resources(
             "industrial_energy_demand_base_s_{clusters}_{planning_horizons}.csv"
         ),
-        industrial_production_per_country_tomorrow=resources(
-            "industrial_production_per_country_tomorrow_{planning_horizons}-modified.csv"
-        ),
-        industry_sector_ratios=resources(
-            "industry_sector_ratios_{planning_horizons}.csv"
-        ),
         pop_weighted_energy_totals=resources(
             "pop_weighted_energy_totals_s_{clusters}.csv"
         ),
         shipping_demand=resources("shipping_demand_s_{clusters}.csv"),
         regions_onshore=resources("regions_onshore_base_s_{clusters}.geojson"),
         regions_offshore=resources("regions_offshore_base_s_{clusters}.geojson"),
-        offshore_connection_points="data/pypsa-de/offshore_connection_points.csv",
-        new_industrial_energy_demand="data/pypsa-de/UBA_Projektionsbericht2025_Abbildung31_MWMS.csv",
+        offshore_connection_points="ariadne-data/offshore_connection_points.csv",
     output:
         network=resources(
             "networks/base_s_{clusters}_{opts}_{sector_opts}_{planning_horizons}_final.nc"
@@ -707,12 +633,12 @@ rule modify_prenetwork:
         "scripts/pypsa-de/modify_prenetwork.py"
 
 
-ruleorder: modify_industry_production > build_industrial_production_per_country_tomorrow
+ruleorder: modify_industry_demand > build_industrial_production_per_country_tomorrow
 
 
 rule modify_existing_heating:
     input:
-        ariadne="data/ariadne_database.csv",
+        ariadne=get_ariadne_database,
         existing_heating="data/existing_infrastructure/existing_heating_raw.csv",
     output:
         existing_heating=resources("existing_heating.csv"),
@@ -752,11 +678,11 @@ rule build_existing_chp_de:
         "scripts/pypsa-de/build_existing_chp_de.py"
 
 
-rule modify_industry_production:
+rule modify_industry_demand:
     params:
-        reference_scenario=config_provider("pypsa-de", "reference_scenario"),
+        reference_scenario= "KN2045_Mix",
     input:
-        ariadne="data/ariadne_database.csv",
+        ariadne=get_ariadne_database,
         industrial_production_per_country_tomorrow=resources(
             "industrial_production_per_country_tomorrow_{planning_horizons}.csv"
         ),
@@ -767,9 +693,9 @@ rule modify_industry_production:
     resources:
         mem_mb=1000,
     log:
-        logs("modify_industry_production_{planning_horizons}.log"),
+        logs("modify_industry_demand_{planning_horizons}.log"),
     script:
-        "scripts/pypsa-de/modify_industry_production.py"
+        "scripts/pypsa-de/modify_industry_demand.py"
 
 
 rule build_wasserstoff_kernnetz:
@@ -792,7 +718,7 @@ rule build_wasserstoff_kernnetz:
             "https://geodata.ucdavis.edu/gadm/gadm4.1/json/gadm41_DEU_1.json.zip",
             keep_local=True,
         ),
-        locations="data/pypsa-de/wasserstoff_kernnetz/locations_wasserstoff_kernnetz.csv",
+        locations="ariadne-data/wasserstoff_kernnetz/locations_wasserstoff_kernnetz.csv",
         regions_onshore=resources("regions_onshore_base_s.geojson"),
         regions_offshore=resources("regions_offshore_base_s.geojson"),
     output:
@@ -822,11 +748,14 @@ rule export_ariadne_variables:
     params:
         planning_horizons=config_provider("scenario", "planning_horizons"),
         hours=config_provider("clustering", "temporal", "resolution_sector"),
+        max_hours=config_provider("electricity", "max_hours"),
+        costs=config_provider("costs"),
         config_industry=config_provider("industry"),
         energy_totals_year=config_provider("energy", "energy_totals_year"),
+        co2_price_add_on_fossils=config_provider("co2_price_add_on_fossils"),
         co2_sequestration_cost=config_provider("sector", "co2_sequestration_cost"),
         post_discretization=config_provider("solving", "options", "post_discretization"),
-        NEP_year=lambda w: config_provider("costs", "custom_cost_fn")(w)[-8:-4],
+        NEP_year=config_provider("costs", "NEP"),
         NEP_transmission=config_provider("costs", "transmission"),
     input:
         template="data/template_ariadne_database.xlsx",
@@ -844,7 +773,7 @@ rule export_ariadne_variables:
             allow_missing=True,
         ),
         costs=expand(
-            resources("costs_{planning_horizons}_processed.csv"),
+            resources("costs_{planning_horizons}.csv"),
             **config["scenario"],
             allow_missing=True,
         ),
@@ -878,7 +807,7 @@ rule plot_ariadne_variables:
         reference_scenario=config_provider("pypsa-de", "reference_scenario"),
     input:
         exported_variables_full=RESULTS + "ariadne/exported_variables_full.xlsx",
-        ariadne_database="data/ariadne_database.csv",
+        ariadne_database=get_ariadne_database,
     output:
         primary_energy=RESULTS + "ariadne/primary_energy.png",
         primary_energy_detailed=RESULTS + "ariadne/primary_energy_detailed.png",
@@ -945,7 +874,7 @@ rule build_scenarios:
         scenarios=config["run"]["name"],
         leitmodelle=config["pypsa-de"]["leitmodelle"],
     input:
-        ariadne_database="data/ariadne_database.csv",
+        ariadne_database=get_ariadne_database,
         scenario_yaml=config["run"]["scenarios"]["manual_file"],
     output:
         scenario_yaml=config["run"]["scenarios"]["file"],
@@ -987,8 +916,10 @@ rule plot_ariadne_report:
         plotting=config_provider("plotting"),
         run=config_provider("run", "name"),
         foresight=config_provider("foresight"),
+        costs=config_provider("costs"),
+        max_hours=config_provider("electricity", "max_hours"),
         post_discretization=config_provider("solving", "options", "post_discretization"),
-        NEP_year=lambda w: config_provider("costs", "custom_cost_fn")(w)[-8:-4],
+        NEP_year=config_provider("costs", "NEP"),
         hours=config_provider("clustering", "temporal", "resolution_sector"),
         NEP_transmission=config_provider("costs", "transmission"),
     input:
@@ -1005,7 +936,7 @@ rule plot_ariadne_report:
         ),
         rc="matplotlibrc",
         costs=expand(
-            resources("costs_{planning_horizons}_processed.csv"),
+            resources("costs_{planning_horizons}.csv"),
             **config["scenario"],
             allow_missing=True,
         ),
