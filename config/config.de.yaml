@@ -14,8 +14,7 @@ remote:
   path: ''
 run:
   prefix: 20260320_PyPSA_DE_hybrid
-  name: 
-  - KN2045_Mix
+  name: KN2045_Mix
   # - ExPol
   # - KN2045_Mix_LowDecentralDiscount
   # - KN2045_Mix_HighDecentralDiscount
